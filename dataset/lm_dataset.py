@@ -78,7 +78,7 @@ class SFTDataset(Dataset):
             messages,
             tokenize=False,
             add_generation_prompt=False,
-            tools=tools
+            tools=[tools] if tools else None
         )
 
     def _generate_loss_mask(self, input_ids):
