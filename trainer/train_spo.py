@@ -19,7 +19,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from transformers import AutoModel
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from dataset.lm_dataset import RLAIFDataset
-from trainer.trainer_utils import *
+from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model
 
 warnings.filterwarnings('ignore')
 
@@ -249,14 +249,14 @@ if __name__ == "__main__":
     parser.add_argument("--save_interval", type=int, default=10, help="模型保存间隔")
     parser.add_argument('--hidden_size', default=512, type=int, help="隐藏层维度")
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
-    parser.add_argument('--use_moe', default=False, type=bool, help="是否使用MoE")
+    parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument('--max_seq_len', default=66, type=int, help="Prompt最大长度")
     parser.add_argument("--max_gen_len", type=int, default=1536, help="生成的最大长度")
     parser.add_argument("--data_path", type=str, default="../dataset/rlaif-mini.jsonl", help="RLAIF数据路径")
     parser.add_argument("--beta", type=float, default=0.02, help="KL惩罚系数")
-    parser.add_argument("--reasoning", type=int, default=1, help='0:普通模型，1:推理模型')
+    parser.add_argument("--reasoning", type=int, default=1, choices=[0, 1], help='推理模型类型（0=普通模型，1=推理模型）')
     parser.add_argument("--reward_model_path", type=str, default="../../internlm2-1_8b-reward", help="Reward模型路径")
-    parser.add_argument('--from_resume', default=0, type=int, help="是否自动检测&续训，0否1是")
+    parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-SPO", help="wandb项目名")
     args = parser.parse_args()
@@ -269,7 +269,7 @@ if __name__ == "__main__":
     # ========== 2. 配置目录、模型参数、检查ckp ==========
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers,
-                               max_seq_len=args.max_seq_len + args.max_gen_len, use_moe=args.use_moe)
+                               max_seq_len=args.max_seq_len + args.max_gen_len, use_moe=bool(args.use_moe))
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='../checkpoints') if args.from_resume==1 else None
     
     # ========== 3. 设置混合精度 ==========
@@ -287,25 +287,17 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
     
     # ========== 5. 初始化模型（Policy, Ref, Reward）和Value Tracker、数据 ==========
-    tokenizer = AutoTokenizer.from_pretrained('../model/')
-    moe_suffix = '_moe' if lm_config.use_moe else ''
     base_weight = "reason" if args.reasoning == 1 else "full_sft"
-    ckp = f'{args.save_dir}/{base_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
-    state_dict = torch.load(ckp, map_location=args.device)
     # Policy模型
-    model = MiniMindForCausalLM(lm_config)
-    model.load_state_dict(state_dict, strict=False)
-    model = model.to(args.device)
-    Logger(f'Policy模型总参数量：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} M')
+    model, tokenizer = init_model(lm_config, base_weight, device=args.device)
     # Reference模型
-    ref_model = MiniMindForCausalLM(lm_config)
-    ref_model.load_state_dict(state_dict, strict=False)
-    ref_model.eval().requires_grad_(False)
-    ref_model = ref_model.to(args.device)
+    ref_model, _ = init_model(lm_config, base_weight, device=args.device)
+    ref_model = ref_model.eval().requires_grad_(False)
     # Reward模型
     reward_model = AutoModel.from_pretrained(
-        args.reward_model_path, device_map="cuda", torch_dtype=torch.float16, trust_remote_code=True
-    ).to(args.device).eval().requires_grad_(False)
+        args.reward_model_path, torch_dtype=torch.float16, trust_remote_code=True
+    )
+    reward_model = reward_model.to(args.device).eval().requires_grad_(False)
     reward_tokenizer = AutoTokenizer.from_pretrained(args.reward_model_path, trust_remote_code=True)
     # Value Tracker
     value_tracker = AutoAdaptiveValueTracker(rho_mode='kl', rho_const=0.9, D_half=0.06, clip_lower=0.5, clip_upper=0.96)
