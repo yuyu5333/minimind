@@ -24,11 +24,36 @@ mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOG_FILE="$LOG_DIR/web_ui_$TIMESTAMP.log"
 
+# 默认端口号
+DEFAULT_PORT=12581
+PORT=$DEFAULT_PORT
+
+# 解析命令行参数
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --port)
+            PORT=$2
+            shift 2
+            ;;
+        *)
+            echo "未知参数: $1"
+            echo "使用方法: bash $0 [--port 端口号]"
+            exit 1
+            ;;
+    esac
+done
+
+# 验证端口号格式
+if ! [[ $PORT =~ ^[0-9]+$ ]] || [ $PORT -lt 1 ] || [ $PORT -gt 65535 ]; then
+    echo "错误: 端口号必须是1-65535之间的整数"
+    exit 1
+fi
+
 echo "启动 MiniMind Web UI 服务..."
 echo "日志文件: $LOG_FILE"
 
 # 使用nohup启动服务
-nohup python -u train_web_ui.py > "$LOG_FILE" 2>&1 &
+nohup python -u train_web_ui.py --port $PORT > "$LOG_FILE" 2>&1 &
 
 # 保存PID
 echo $! > "train_web_ui.pid"

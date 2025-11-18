@@ -156,7 +156,7 @@ class SkipBatchSampler(Sampler):
 
 
 def wrap_model_for_distributed(model: torch.nn.Module, dist_type: str = 'ddp', local_rank: int = 0,
-                               dtype: str = 'bfloat16', auto_wrap_threshold: int = 10000000, optimizer: any = None, lr: float = 1e-4) -> torch.nn.Module:
+                               dtype: str = 'bfloat16', auto_wrap_threshold: int = 10000000, optimizer: any = None, lr: float = 1e-4):
     if not dist.is_initialized():
         return model
     model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
@@ -173,7 +173,7 @@ def wrap_model_for_distributed(model: torch.nn.Module, dist_type: str = 'ddp', l
             device_id=torch.device(f'cuda:{local_rank}') if torch.cuda.is_available() else None,
             use_orig_params=True,
         )
-        optimizer = optim.AdamW(fsdp_model.parameters(), lr=lr)
+        optimizer = torch.optim.AdamW(fsdp_model.parameters(), lr=lr)
         return fsdp_model, optimizer
     else:
         from torch.nn.parallel import DistributedDataParallel

@@ -15,7 +15,8 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from model.model_minimind import MiniMindConfig
 from dataset.lm_dataset import SFTDataset
-from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler, wrap_model_for_distributed, get_state_dict_for_saving, safe_load_state_dict
+from trainer.trainer_utils import (get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler, 
+                                   wrap_model_for_distributed, get_state_dict_for_saving, safe_load_state_dict, is_fsdp_model)
 
 warnings.filterwarnings('ignore')
 
@@ -49,7 +50,8 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             scaler.unscale_(optimizer)
             
             # FSDP实例，使用FSDP的clip_grad_norm_方法
-            if isinstance(model, torch.distributed.fsdp.FullyShardedDataParallel):
+            
+            if is_fsdp_model(model):
                 model.clip_grad_norm_(args.grad_clip)
             else:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)

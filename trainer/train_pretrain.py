@@ -15,7 +15,8 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from model.model_minimind import MiniMindConfig
 from dataset.lm_dataset import PretrainDataset
-from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler, wrap_model_for_distributed, get_state_dict_for_saving, safe_load_state_dict
+from trainer.trainer_utils import (get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler, 
+                                   wrap_model_for_distributed, get_state_dict_for_saving, safe_load_state_dict, is_fsdp_model)
 
 warnings.filterwarnings('ignore')
 
@@ -33,21 +34,25 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
 
         with autocast_ctx:
             res = model(X)
+            logits = res['logits']
             loss = loss_fct(
-                res.logits.view(-1, res.logits.size(-1)),
+                logits.view(-1, logits.size(-1)),
                 Y.view(-1)
             ).view(Y.size())
 
             loss = (loss * loss_mask).sum() / loss_mask.sum()
-            loss += res.aux_loss
+            loss += res['aux_loss']
             loss = loss / args.accumulation_steps
 
         scaler.scale(loss).backward()
 
         if (step + 1) % args.accumulation_steps == 0:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-
+            # FSDP实例，使用FSDP的clip_grad_norm_方法
+            if is_fsdp_model(model):
+                model.clip_grad_norm_(args.grad_clip)
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             scaler.step(optimizer)
             scaler.update()
 
@@ -146,7 +151,7 @@ if __name__ == "__main__":
     
     # ========== 7. DDP/FSDP包模型 ==========
     if dist.is_initialized():
-        model = wrap_model_for_distributed(model, dist_type=args.dist_type, local_rank=local_rank, dtype=args.dtype)
+        model, optimizer = wrap_model_for_distributed(model, dist_type=args.dist_type, local_rank=local_rank, dtype=args.dtype, optimizer=optimizer, lr=args.learning_rate)
     
     # ========== 8. 开始训练 ==========
     for epoch in range(start_epoch, args.epochs):

@@ -9,6 +9,7 @@ import signal
 from flask import Flask, render_template, request, jsonify, redirect, url_for
 import time
 import psutil
+import argparse
 
 # 尝试导入torch来检测GPU
 try:
@@ -630,6 +631,11 @@ if hasattr(signal, 'SIGTERM'):
 atexit.register(save_processes_info)
 
 if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser(description='启动Flask服务器')
+    parser.add_argument('--port', type=int, default=12581, help='指定服务器端口号')
+    args = parser.parse_args()
+    
     # 加载已保存的进程信息
     load_processes_info()
     
@@ -637,8 +643,8 @@ if __name__ == '__main__':
     with open(PID_FILE, 'w') as f:
         f.write(str(os.getpid()))
     
-    # 尝试使用默认端口12581，如果被占用则自动寻找可用端口
-    port = find_available_port(12581)
+    # 尝试使用指定端口或默认端口12581，如果被占用则自动寻找可用端口
+    port = find_available_port(args.port)
     if port is not None:
         print(f"启动Flask服务器在 http://0.0.0.0:{port}")
         print(f"使用nohup启动可保持服务持续运行: nohup python -u scripts/train_web_ui.py &")
