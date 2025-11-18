@@ -169,6 +169,8 @@ def start_training_process(train_type, params):
         elif key == 'from_resume':
             # 确保传递参数名和参数值
             cmd.extend([f'--{key}', str(value)])
+        elif key == 'dist_type':
+            cmd.extend(['--dist_type', str(value)])
         else:
             # 确保log_interval和save_interval参数正确传递
             cmd.extend([f'--{key}', str(value)])

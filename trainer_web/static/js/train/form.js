@@ -60,6 +60,7 @@ function initGpuSelectors() {
   const hasGpu = window.hasGpu === true;
   const gpuCount = Number(window.gpuCount || 0);
   const modeSel = document.getElementById('training_mode');
+  const distSel = document.getElementById('dist_type');
   const single = document.getElementById('single-gpu-selection');
   const multi = document.getElementById('multi-gpu-selection');
   if (!modeSel) return;
@@ -67,11 +68,23 @@ function initGpuSelectors() {
     const mode = modeSel.value;
     if (single) single.style.display = mode === 'single_gpu' ? 'block' : 'none';
     if (multi) multi.style.display = mode === 'multi_gpu' ? 'block' : 'none';
+    if (distSel) {
+      if (mode === 'single_gpu') {
+        distSel.value = 'ddp';
+        distSel.disabled = true;
+      } else {
+        distSel.disabled = false;
+      }
+    }
   }
   if (!hasGpu) {
     modeSel.value = 'cpu';
     if (single) single.style.display = 'none';
     if (multi) multi.style.display = 'none';
+    if (distSel) {
+      distSel.value = 'ddp';
+      distSel.disabled = true;
+    }
   } else {
     const gpuNumInput = document.getElementById('gpu_num');
     if (gpuNumInput && gpuCount > 0) gpuNumInput.value = gpuCount;
@@ -90,6 +103,13 @@ function onSubmit(e) {
   inputs.forEach((el) => {
     const name = el.name;
     if (!name || name === 'training_mode') return;
+    if (name === 'dist_type') {
+      const mode = trainingMode;
+      if (mode === 'single_gpu') {
+        data[name] = 'ddp';
+        return;
+      }
+    }
     const card = el.closest('.parameter-card');
     const visible = !card || card.style.display !== 'none';
     if (!visible) return;

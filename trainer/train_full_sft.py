@@ -15,7 +15,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from model.model_minimind import MiniMindConfig
 from dataset.lm_dataset import SFTDataset
-from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler
+from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler, wrap_model_for_distributed, get_state_dict_for_saving, safe_load_state_dict
 
 warnings.filterwarnings('ignore')
 
@@ -33,20 +33,26 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
 
         with autocast_ctx:
             res = model(X)
+            logits = res['logits']
             loss = loss_fct(
-                res.logits.view(-1, res.logits.size(-1)),
+                logits.view(-1, logits.size(-1)),
                 Y.view(-1)
             ).view(Y.size())
 
             loss = (loss * loss_mask).sum() / loss_mask.sum()
-            loss += res.aux_loss
+            loss += res['aux_loss']
             loss = loss / args.accumulation_steps
 
         scaler.scale(loss).backward()
 
         if (step + 1) % args.accumulation_steps == 0:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            
+            # FSDP实例，使用FSDP的clip_grad_norm_方法
+            if isinstance(model, torch.distributed.fsdp.FullyShardedDataParallel):
+                model.clip_grad_norm_(args.grad_clip)
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
             scaler.step(optimizer)
             scaler.update()
@@ -68,11 +74,8 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             model.eval()
             moe_suffix = '_moe' if lm_config.use_moe else ''
             ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
-            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                state_dict = model.module.state_dict()
-            else:
-                state_dict = model.state_dict()
-            state_dict = {k: v.half() for k, v in state_dict.items()}  # 半精度保存
+            state_dict = get_state_dict_for_saving(model)
+            state_dict = {k: v.half() for k, v in state_dict.items()}
             torch.save(state_dict, ckp)
             lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, 
                          epoch=epoch, step=step, wandb=wandb, save_dir='../checkpoints', scaler=scaler)
@@ -102,6 +105,7 @@ if __name__ == "__main__":
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-Full-SFT", help="wandb项目名")
+    parser.add_argument("--dist_type", type=str, default="ddp", choices=["ddp", "fsdp"], help="分布式类型：ddp或fsdp")
     args = parser.parse_args()
 
     # ========== 1. 初始化环境和随机种子 ==========
@@ -138,17 +142,16 @@ if __name__ == "__main__":
     # ========== 6. 从ckp恢复状态 ==========
     start_epoch, start_step = 0, 0
     if ckp_data:
-        model.load_state_dict(ckp_data['model'])
+        safe_load_state_dict(model, ckp_data['model'])
         optimizer.load_state_dict(ckp_data['optimizer'])
         scaler.load_state_dict(ckp_data['scaler'])
         start_epoch = ckp_data['epoch']
         start_step = ckp_data.get('step', 0)
     
-    # ========== 7. DDP包模型 ==========
+    # ========== 7. DDP/FSDP包模型 ==========
     if dist.is_initialized():
-        model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
-        model = DistributedDataParallel(model, device_ids=[local_rank])
-    
+        model, optimizer = wrap_model_for_distributed(model, dist_type=args.dist_type, local_rank=local_rank, dtype=args.dtype, optimizer=optimizer, lr=args.learning_rate)
+
     # ========== 8. 开始训练 ==========
     for epoch in range(start_epoch, args.epochs):
         train_sampler and train_sampler.set_epoch(epoch)

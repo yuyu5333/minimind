@@ -10,6 +10,21 @@ import torch.distributed as dist
 from torch.utils.data import Sampler
 from transformers import AutoTokenizer
 from model.model_minimind import MiniMindForCausalLM
+from typing import Optional
+
+try:
+    from torch.distributed.fsdp import (
+        FullyShardedDataParallel as FSDP,
+        StateDictType,
+        FullStateDictConfig,
+        MixedPrecision,
+        CPUOffload,
+        ShardingStrategy,
+    )
+    from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy as _size_based_auto_wrap_policy
+    HAS_FSDP = True
+except Exception:
+    HAS_FSDP = False
 
 
 def is_main_process():
@@ -51,8 +66,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
     resume_path = f'{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}_resume.pth'
 
     if model is not None:
-        from torch.nn.parallel import DistributedDataParallel
-        state_dict = model.module.state_dict() if isinstance(model, DistributedDataParallel) else model.state_dict()
+        state_dict = get_state_dict_for_saving(model)
         ckp_tmp = ckp_path + '.tmp'
         torch.save({k: v.half() for k, v in state_dict.items()}, ckp_tmp)
         os.replace(ckp_tmp, ckp_path)
@@ -75,9 +89,13 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
         for key, value in kwargs.items():
             if value is not None:
                 if hasattr(value, 'state_dict'):
-                    if isinstance(value, DistributedDataParallel):
-                        resume_data[key] = value.module.state_dict()
-                    else:
+                    try:
+                        import torch.nn as nn
+                        if isinstance(value, nn.Module):
+                            resume_data[key] = get_state_dict_for_saving(value)
+                        else:
+                            resume_data[key] = value.state_dict()
+                    except Exception:
                         resume_data[key] = value.state_dict()
                 else:
                     resume_data[key] = value
@@ -135,4 +153,52 @@ class SkipBatchSampler(Sampler):
     def __len__(self):
         total_batches = (len(self.sampler) + self.batch_size - 1) // self.batch_size
         return max(0, total_batches - self.skip_batches)
+
+
+def wrap_model_for_distributed(model: torch.nn.Module, dist_type: str = 'ddp', local_rank: int = 0,
+                               dtype: str = 'bfloat16', auto_wrap_threshold: int = 10000000, optimizer: any = None, lr: float = 1e-4) -> torch.nn.Module:
+    if not dist.is_initialized():
+        return model
+    model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
+    if dist_type == 'fsdp' and HAS_FSDP:
+        mp_dtype = torch.bfloat16 if dtype == 'bfloat16' else torch.float16
+        mixed_precision = MixedPrecision(param_dtype=mp_dtype, reduce_dtype=mp_dtype, buffer_dtype=mp_dtype)
+        def auto_wrap_policy(module, recurse, nonwrapped_numel):
+            return _size_based_auto_wrap_policy(module, recurse, nonwrapped_numel, min_num_params=int(auto_wrap_threshold))
+        fsdp_model = FSDP(
+            model,
+            mixed_precision=mixed_precision,
+            sharding_strategy=ShardingStrategy.FULL_SHARD,
+            auto_wrap_policy=auto_wrap_policy,
+            device_id=torch.device(f'cuda:{local_rank}') if torch.cuda.is_available() else None,
+            use_orig_params=True,
+        )
+        optimizer = optim.AdamW(fsdp_model.parameters(), lr=lr)
+        return fsdp_model, optimizer
+    else:
+        from torch.nn.parallel import DistributedDataParallel
+        ddp_model = DistributedDataParallel(model, device_ids=[local_rank])
+        return ddp_model, optimizer
+
+
+def is_fsdp_model(model: torch.nn.Module) -> bool:
+    return HAS_FSDP and isinstance(model, FSDP)
+
+
+def get_state_dict_for_saving(model: torch.nn.Module) -> dict:
+    if is_fsdp_model(model):
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)):
+            full_sd = model.state_dict()
+        return full_sd
+    from torch.nn.parallel import DistributedDataParallel
+    return model.module.state_dict() if isinstance(model, DistributedDataParallel) else model.state_dict()
+
+
+def safe_load_state_dict(model: torch.nn.Module, state_dict: dict, strict: bool = False):
+    if is_fsdp_model(model):
+        return model.module.load_state_dict(state_dict, strict=strict)
+    from torch.nn.parallel import DistributedDataParallel
+    if isinstance(model, DistributedDataParallel):
+        return model.module.load_state_dict(state_dict, strict=strict)
+    return model.load_state_dict(state_dict, strict=strict)
 

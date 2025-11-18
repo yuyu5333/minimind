@@ -16,7 +16,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from model.model_minimind import MiniMindConfig
 from dataset.lm_dataset import DPODataset
-from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler
+from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler, wrap_model_for_distributed, safe_load_state_dict
 
 warnings.filterwarnings('ignore')
 
@@ -106,11 +106,9 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
             model.eval()
             moe_suffix = '_moe' if lm_config.use_moe else ''
             ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
-            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                state_dict = model.module.state_dict()
-            else:
-                state_dict = model.state_dict()
-            state_dict = {k: v.half() for k, v in state_dict.items()}  # 半精度保存
+            from trainer.trainer_utils import get_state_dict_for_saving
+            state_dict = get_state_dict_for_saving(model)
+            state_dict = {k: v.half() for k, v in state_dict.items()}  
             torch.save(state_dict, ckp)
             lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, save_dir='../checkpoints')
             model.train()
@@ -140,6 +138,7 @@ if __name__ == "__main__":
     parser.add_argument('--beta', default=0.1, type=float, help="DPO中的beta参数")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-DPO", help="wandb项目名")
+    parser.add_argument("--dist_type", type=str, default="ddp", choices=["ddp", "fsdp"], help="分布式类型：ddp或fsdp")
     args = parser.parse_args()
 
     # ========== 1. 初始化环境和随机种子 ==========
@@ -183,7 +182,7 @@ if __name__ == "__main__":
     # ========== 6. 从ckp恢复状态 ==========
     start_epoch, start_step = 0, 0
     if ckp_data:
-        model.load_state_dict(ckp_data['model'])
+        safe_load_state_dict(model, ckp_data['model'])
         optimizer.load_state_dict(ckp_data['optimizer'])
         scaler.load_state_dict(ckp_data['scaler'])
         start_epoch = ckp_data['epoch']
@@ -191,8 +190,7 @@ if __name__ == "__main__":
     
     # ========== 7. DDP包模型 ==========
     if dist.is_initialized():
-        model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
-        model = DistributedDataParallel(model, device_ids=[local_rank])
+        model = wrap_model_for_distributed(model, dist_type=args.dist_type, local_rank=local_rank, dtype=args.dtype)
     
     # ========== 8. 开始训练 ==========
     for epoch in range(start_epoch, args.epochs):

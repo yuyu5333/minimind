@@ -225,6 +225,13 @@
                                 <option value="cpu">CPU训练</option>
                             </select>
                         </div>
+                        <div class="form-group">
+                            <label for="dist_type">分布式类型：</label>
+                            <select id="dist_type" name="dist_type">
+                                <option value="ddp">DDP</option>
+                                <option value="fsdp">FSDP</option>
+                            </select>
+                        </div>
                         <div class="form-group" id="single-gpu-selection">
                             <label for="device">GPU序号：</label>
                             <input type="number" id="device" name="device" min="0" max="{{ gpu_count|default(1) - 1 }}" value="0" required>

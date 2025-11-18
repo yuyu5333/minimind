@@ -20,7 +20,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from transformers import AutoModel
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from dataset.lm_dataset import RLAIFDataset
-from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model
+from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, wrap_model_for_distributed, get_state_dict_for_saving, safe_load_state_dict
 
 warnings.filterwarnings('ignore')
 
@@ -264,6 +264,7 @@ if __name__ == "__main__":
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-PPO", help="wandb项目名")
+    parser.add_argument("--dist_type", type=str, default="ddp", choices=["ddp", "fsdp"], help="分布式类型：ddp或fsdp")
     args = parser.parse_args()
 
     # ========== 1. 初始化环境和随机种子 ==========
@@ -328,8 +329,8 @@ if __name__ == "__main__":
     # ========== 6. 从ckp恢复状态 ==========
     start_epoch, start_step = 0, 0
     if ckp_data:
-        actor_model.load_state_dict(ckp_data['model'])
-        critic_model.load_state_dict(ckp_data['critic_model'])
+        safe_load_state_dict(actor_model, ckp_data['model'])
+        safe_load_state_dict(critic_model, ckp_data['critic_model'])
         actor_optimizer.load_state_dict(ckp_data['optimizer'])
         critic_optimizer.load_state_dict(ckp_data['critic_optimizer'])
         actor_scheduler.load_state_dict(ckp_data['scheduler'])
@@ -339,10 +340,8 @@ if __name__ == "__main__":
     
     # ========== 7. DDP包模型 ==========
     if dist.is_initialized():
-        actor_model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
-        critic_model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
-        actor_model = DistributedDataParallel(actor_model, device_ids=[local_rank])
-        critic_model = DistributedDataParallel(critic_model, device_ids=[local_rank])
+        actor_model = wrap_model_for_distributed(actor_model, dist_type=args.dist_type, local_rank=local_rank, dtype=args.dtype)
+        critic_model = wrap_model_for_distributed(critic_model, dist_type=args.dist_type, local_rank=local_rank, dtype=args.dtype)
         old_actor_model.to(args.device)
     
     # ========== 8. 开始训练 ==========
